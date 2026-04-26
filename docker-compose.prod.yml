@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: nutriai-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-nutriai}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-nutriai}
+      POSTGRES_DB: ${DB_NAME:-nutriai}
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nutriai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nutriai-network
+
+  # FastAPI Application
+  app:
+    build: .
+    container_name: nutriai-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-nutriai}:${DB_PASSWORD:-nutriai}@db:5432/${DB_NAME:-nutriai}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      USDA_API_KEY: ${USDA_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - nutriai-network
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  nutriai-network:
+    driver: bridge
