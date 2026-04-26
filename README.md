@@ -129,10 +129,8 @@ nutriai-backend/
 ├── docker-compose.yml           # Local Postgres
 ├── pytest.ini                   # Test configuration
 ├── run_tests.py                 # Test runner with shortcuts
-├── railway.toml                 # Railway deployment config
 ├── Procfile                     # Web process definition
 ├── requirements.txt
-└── .env.example
 ```
 
 ---
@@ -422,47 +420,6 @@ python run_tests.py --url https://your-app.railway.app
 ```
 
 Tests are stateful — they run in order and share a single test user created at the start of each run. Each run creates a fresh user (unique email) so re-runs never conflict.
-
----
-
-## Deployment
-
-### Railway (recommended — free tier)
-
-1. Push code to GitHub
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Select your repository
-4. Add a PostgreSQL plugin: **+ New** → **Database** → **PostgreSQL**
-5. Set environment variables in Railway dashboard:
-
-```
-GROQ_API_KEY      = gsk_...
-USDA_API_KEY      = ...
-JWT_SECRET        = <generate with: python -c "import secrets; print(secrets.token_hex(32))">
-DATABASE_URL      = (auto-filled by Railway from Postgres plugin)
-```
-
-6. Deploy — Railway auto-detects `railway.toml` and runs:
-```
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
-
-Your API will be live at `https://your-project-name.railway.app` in ~3 minutes.
-
-**Share with iOS developer:**
-```
-Base URL:  https://your-project-name.railway.app/api/v1
-API docs:  https://your-project-name.railway.app/docs
-```
-
-### Other options
-
-| Platform | Free tier | Notes |
-|---|---|---|
-| Railway | ✅ $5 credit/month | Easiest, Postgres included |
-| Render | ✅ 750 hrs/month | Spins down after 15min inactivity |
-| Fly.io | ✅ Generous limits | More config required |
-| AWS/GCP/Azure | ❌ Paid | Production use |
 
 ---
 
