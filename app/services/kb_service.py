@@ -60,14 +60,15 @@ async def save_log(
     db.add(log)
 
     # 2. Upsert DailySummary
+    # _get_or_create_summary guarantees all numeric fields are non-None
     summary = await _get_or_create_summary(db, user_id, today)
-    summary.total_calories  += log.calories
-    summary.total_protein_g += log.protein_g
-    summary.total_carbs_g   += log.carbs_g
-    summary.total_fat_g     += log.fat_g
-    summary.total_fiber_g   += log.fiber_g
-    summary.meals_logged    += 1
-    summary.updated_at       = datetime.utcnow()
+    summary.total_calories  = float(summary.total_calories)  + float(log.calories  or 0)
+    summary.total_protein_g = float(summary.total_protein_g) + float(log.protein_g or 0)
+    summary.total_carbs_g   = float(summary.total_carbs_g)   + float(log.carbs_g   or 0)
+    summary.total_fat_g     = float(summary.total_fat_g)     + float(log.fat_g     or 0)
+    summary.total_fiber_g   = float(summary.total_fiber_g)   + float(log.fiber_g   or 0)
+    summary.meals_logged    = int(summary.meals_logged) + 1
+    summary.updated_at      = datetime.utcnow()
 
     # 3. Recalculate remaining macros against user targets
     user = await db.get(User, user_id)
@@ -177,8 +178,31 @@ async def _get_or_create_summary(
             id=str(uuid.uuid4()),
             user_id=user_id,
             log_date=log_date,
+            # Explicitly set all numeric fields to 0.0
+            # SQLAlchemy model defaults only fire on DB insert,
+            # not on in-memory object creation — so we set them here.
+            total_calories=0.0,
+            total_protein_g=0.0,
+            total_carbs_g=0.0,
+            total_fat_g=0.0,
+            total_fiber_g=0.0,
+            meals_logged=0,
+            remaining_calories=0.0,
+            remaining_protein_g=0.0,
+            is_binge_day=False,
         )
         db.add(summary)
+    else:
+        # Row fetched from DB — coerce any NULL columns to 0.0
+        # This handles tables created before explicit defaults were set
+        summary.total_calories   = float(summary.total_calories  or 0)
+        summary.total_protein_g  = float(summary.total_protein_g or 0)
+        summary.total_carbs_g    = float(summary.total_carbs_g   or 0)
+        summary.total_fat_g      = float(summary.total_fat_g     or 0)
+        summary.total_fiber_g    = float(summary.total_fiber_g   or 0)
+        summary.meals_logged     = int(summary.meals_logged       or 0)
+        summary.remaining_calories  = float(summary.remaining_calories  or 0)
+        summary.remaining_protein_g = float(summary.remaining_protein_g or 0)
     return summary
 
 

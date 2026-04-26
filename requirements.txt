@@ -12,3 +12,4 @@ psycopg2-binary==2.9.9
 PyJWT==2.9.0
 bcrypt==4.2.0
 slowapi==0.1.9
+apscheduler==3.10.4

@@ -3,8 +3,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     GROQ_API_KEY: str
     USDA_API_KEY: str
-    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost/nutriai"
-    JWT_SECRET: str = "change-this-to-a-long-random-string-before-deploy"
+    DATABASE_URL: str = "postgresql+asyncpg://nutriai@127.0.0.1:5432/nutriai"
+    JWT_SECRET: str 
     
     class Config:
         env_file = ".env"

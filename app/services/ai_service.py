@@ -8,6 +8,10 @@ context dict before generating any response, making every call
 Models used:
   - Food image analysis : meta-llama/llama-4-scout-17b-16e-instruct  (vision)
   - Meal plan / text    : llama-3.3-70b-versatile                    (text, faster + cheaper)
+
+NOTE: analyze_food_agentic lives in agents/analyser_agent.py
+      It is NOT imported here to avoid circular imports.
+      meal.py imports it directly from agents.analyser_agent.
 """
 
 import json
@@ -21,22 +25,112 @@ TEXT_MODEL   = "llama-3.3-70b-versatile"
 
 
 # ─────────────────────────────────────────────
-# Helper: clean JSON out of model response
+# Helper: robustly parse JSON from model output
 # ─────────────────────────────────────────────
 
 def _parse_json(raw: str) -> dict:
+    """
+    Robustly extract JSON from model response.
+    Handles: raw JSON, ```json fences, ``` fences, leading prose before {
+    """
     raw = raw.strip()
+
+    # Strip markdown fences
     if raw.startswith("```"):
         parts = raw.split("```")
-        # parts[1] is the content between first and second ```
-        raw = parts[1]
+        raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw.strip())
+        raw = raw.strip()
+
+    # If model added prose before the JSON, find the first { or [
+    if not raw.startswith(("{", "[")):
+        brace   = raw.find("{")
+        bracket = raw.find("[")
+        if brace == -1 and bracket == -1:
+            raise ValueError(f"No JSON object found in response: {raw[:200]}")
+        start = min(x for x in [brace, bracket] if x != -1)
+        raw = raw[start:]
+
+    # Try parsing as-is first
+    try:
+        return json.loads(raw.strip())
+    except json.JSONDecodeError:
+        # Model appended prose after the JSON — strip it
+        last_brace   = raw.rfind("}")
+        last_bracket = raw.rfind("]")
+        end = max(last_brace, last_bracket)
+        if end != -1:
+            return json.loads(raw[:end + 1])
+        raise
 
 
 # ─────────────────────────────────────────────
-# 1. Food Image / Text Analysis
+# Helper: guarantee food response shape
+# ─────────────────────────────────────────────
+
+def _normalise_food_response(result: dict) -> dict:
+    """
+    Ensures the food analysis response always has every expected field,
+    regardless of how the model structured its output.
+    Called immediately after _parse_json in analyze_food().
+    Prevents all KeyError / TypeError crashes downstream.
+    """
+    # ── food_items ──────────────────────────────
+    if "food_items" not in result or not isinstance(result["food_items"], list):
+        result["food_items"] = []
+
+    for item in result["food_items"]:
+        for field in ("calories", "protein_g", "carbs_g", "fat_g", "fiber_g"):
+            if field not in item or item[field] is None:
+                item[field] = 0.0
+            else:
+                item[field] = float(item[field])
+        item.setdefault("name",     "Unknown food")
+        item.setdefault("quantity", "1 serving")
+
+    # ── total ────────────────────────────────────
+    if "total" not in result or not isinstance(result.get("total"), dict):
+        # Compute from food_items if model forgot to include it
+        result["total"] = {
+            "calories":  sum(i["calories"]  for i in result["food_items"]),
+            "protein_g": sum(i["protein_g"] for i in result["food_items"]),
+            "carbs_g":   sum(i["carbs_g"]   for i in result["food_items"]),
+            "fat_g":     sum(i["fat_g"]     for i in result["food_items"]),
+            "fiber_g":   sum(i["fiber_g"]   for i in result["food_items"]),
+        }
+    else:
+        for field in ("calories", "protein_g", "carbs_g", "fat_g", "fiber_g"):
+            result["total"].setdefault(field, 0.0)
+
+    # ── micros ───────────────────────────────────
+    default_micros = {
+        "iron_mg": 0, "calcium_mg": 0, "vitamin_c_mg": 0,
+        "vitamin_d_iu": 0, "vitamin_b12_mcg": 0, "zinc_mg": 0,
+        "magnesium_mg": 0, "potassium_mg": 0, "sodium_mg": 0,
+        "omega3_g": 0, "folate_mcg": 0,
+    }
+    if "micros" not in result or not isinstance(result.get("micros"), dict):
+        result["micros"] = default_micros
+    else:
+        for k, v in default_micros.items():
+            result["micros"].setdefault(k, v)
+
+    # ── confidence ───────────────────────────────
+    raw_conf = result.get("confidence")
+    if raw_conf is None or not isinstance(raw_conf, (int, float)):
+        result["confidence"] = 0.7   # safe default
+    else:
+        result["confidence"] = max(0.0, min(1.0, float(raw_conf)))
+
+    # ── notes ────────────────────────────────────
+    result.setdefault("notes", "")
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# 1. Food analysis — image and/or text
 # ─────────────────────────────────────────────
 
 async def analyze_food(
@@ -45,8 +139,10 @@ async def analyze_food(
     context: dict,
 ) -> dict:
     """
-    Analyze a meal from image and/or text description.
-    Context is used to improve accuracy (e.g. dietary restrictions).
+    Analyse a meal from image and/or text description.
+    Returns a normalised dict — all fields guaranteed to exist.
+    Called by analyser_agent.analyze_food_agentic() which wraps this
+    with a confidence-check loop before returning to meal.py.
     """
     restrictions = context.get("dietary_restrictions") or []
     restriction_note = (
@@ -114,7 +210,7 @@ Return this exact JSON structure:
 
 Rules:
 - List every distinct food item separately
-- confidence: 0.0–1.0 (how clearly visible/described the food is)
+- confidence: 0.0-1.0 (how clearly visible/described the food is)
 - If you cannot identify something, still estimate with low confidence
 - Quantities in grams or common measures (1 cup, 2 tbsp)
 - Always include micros block even if values are 0
@@ -127,24 +223,29 @@ Rules:
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_content if image_base64 else text_input},
+            # Always pass user_content (the list) — never the plain string.
+            # user_content contains the full JSON schema instructions.
+            # Passing text_input instead would strip the format prompt
+            # and cause the model to return unstructured output.
+            {"role": "user", "content": user_content},
         ],
         max_tokens=1000,
         temperature=0.1,
     )
 
-    return _parse_json(response.choices[0].message.content)
+    raw = response.choices[0].message.content
+    result = _parse_json(raw)
+    return _normalise_food_response(result)   # ← normalise called here
 
 
 # ─────────────────────────────────────────────
-# 2. Meal Plan Generator
-# Uses full context including binge recovery flag
+# 2. Meal plan generator
 # ─────────────────────────────────────────────
 
 async def generate_meal_plan(context: dict, trigger: str = "daily_routine") -> dict:
     """
-    Generate a meal plan for the rest of today (or tomorrow if evening).
-    Trigger can be: daily_routine | binge_recovery | inventory_expiry | user_request
+    Generate a meal plan for the remaining meals today.
+    Trigger: daily_routine | binge_recovery | inventory_expiry | user_request
     """
     binge_mode    = context.get("binge_recovery_mode", False)
     binge_days    = context.get("binge_days_count", 0)
@@ -156,24 +257,21 @@ async def generate_meal_plan(context: dict, trigger: str = "daily_routine") -> d
     week_summary  = context.get("week_summary", [])
     today_meals   = context.get("today_meals", [])
 
-    # Build inventory string for prompt
     inventory_str = (
         "\n".join(f"- {i['name']} ({i.get('quantity','?')})" for i in inventory)
         if inventory else "No inventory tracked yet"
     )
     expiring_str = ", ".join(expiring_soon) if expiring_soon else "none"
 
-    # Build week history string
     week_str = (
         "\n".join(
             f"- {d['date']}: {d['calories']} kcal "
-            f"({'OVER' if d['vs_target']>0 else 'under'} by {abs(d['vs_target'])} kcal)"
+            f"({'OVER' if d['vs_target'] > 0 else 'under'} by {abs(d['vs_target'])} kcal)"
             f"{' [BINGE]' if d['is_binge_day'] else ''}"
             for d in week_summary
         ) if week_summary else "No history yet"
     )
 
-    # Binge recovery instruction
     binge_instruction = ""
     if binge_mode:
         binge_instruction = f"""
@@ -253,14 +351,16 @@ Return ONLY this JSON structure:
     )
 
     result = _parse_json(response.choices[0].message.content)
-    result["trigger"] = trigger
+    result.setdefault("plan_summary", "Meal plan generated based on your targets.")
+    result.setdefault("meals", [])
+    result.setdefault("total_plan_macros", {})
+    result["trigger"]       = trigger
     result["binge_recovery"] = binge_mode
     return result
 
 
 # ─────────────────────────────────────────────
-# 3. Inventory-aware meal suggestion
-# Quick call — just uses inventory + restrictions
+# 3. Inventory-aware meal suggestions
 # ─────────────────────────────────────────────
 
 async def suggest_from_inventory(context: dict) -> dict:
@@ -301,4 +401,82 @@ Return ONLY JSON:
         temperature=0.5,
     )
 
-    return _parse_json(response.choices[0].message.content)
+    result = _parse_json(response.choices[0].message.content)
+    result.setdefault("suggestions", [])
+    return result
+
+async def scan_inventory_image(image_base64: str) -> dict:
+    """
+    Identify grocery/fridge items from a photo.
+    Returns a list of items ready to be bulk-added to inventory.
+    Called by POST /inventory/scan-image
+    """
+    system_prompt = """You are a grocery and pantry inventory AI.
+Analyse the image and identify every distinct food item you can see.
+For each item estimate: quantity visible, likely category, and approximate shelf life.
+
+Return ONLY valid JSON. No explanation, no markdown, no preamble."""
+
+    prompt = """Identify all food/grocery items in this image.
+
+Return this exact JSON:
+{
+  "items": [
+    {
+      "name": "Eggs",
+      "quantity": "6",
+      "category": "protein",
+      "estimated_shelf_days": 21,
+      "confidence": 0.95
+    },
+    {
+      "name": "Spinach",
+      "quantity": "200g",
+      "category": "vegetable",
+      "estimated_shelf_days": 4,
+      "confidence": 0.88
+    }
+  ],
+  "scan_confidence": 0.9,
+  "notes": "Clear lighting, items easily identifiable"
+}
+
+Categories: protein | vegetable | dairy | grain | fruit | spice | beverage | other
+estimated_shelf_days: realistic fridge/pantry life from today
+confidence per item: 0.0-1.0
+scan_confidence: overall image quality score"""
+
+    response = client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                    },
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ],
+        max_tokens=1000,
+        temperature=0.1,
+    )
+
+    result = _parse_json(response.choices[0].message.content)
+
+    # Normalise response
+    result.setdefault("items", [])
+    result.setdefault("scan_confidence", 0.7)
+    result.setdefault("notes", "")
+
+    for item in result["items"]:
+        item.setdefault("name", "Unknown item")
+        item.setdefault("quantity", None)
+        item.setdefault("category", "other")
+        item.setdefault("estimated_shelf_days", 7)
+        item.setdefault("confidence", 0.7)
+
+    return result

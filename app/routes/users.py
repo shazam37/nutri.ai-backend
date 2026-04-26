@@ -24,7 +24,7 @@ from typing import Literal
 
 from app.db import get_db
 from app.models.models import User
-from app.routes.auth import get_current_user
+from app.core.dependencies import get_current_user
 
 router = APIRouter(prefix="/users", tags=["users"])
 

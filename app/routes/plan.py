@@ -23,7 +23,7 @@ from app.db import get_db
 from app.models.models import MealPlan, DailySummary, User
 from app.services.ai_service import generate_meal_plan
 from app.services.kb_service import get_user_context
-from app.routes.auth import get_current_user
+from app.core.dependencies import get_current_user
 
 router = APIRouter(prefix="/plan", tags=["plan"])
 

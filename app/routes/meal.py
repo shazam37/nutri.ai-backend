@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.limiter import limiter
 from app.models.models import User
-from app.routes.auth import get_current_user
-from app.services.ai_service import analyze_food, generate_meal_plan, suggest_from_inventory
+from app.core.dependencies import get_current_user
+from app.services.ai_service import generate_meal_plan, suggest_from_inventory
+from app.agents.analyser_agent import analyze_food_agentic
 from app.services.usda_service import validate_food
 from app.services.kb_service import save_log, get_user_context
 
@@ -16,19 +17,19 @@ router = APIRouter(prefix="/meal", tags=["meal"])
 # ─── Request / Response models ───────────────
 
 class LogMealRequest(BaseModel):
-    user_id: str
+    # user_id comes from JWT token — not required in body
     image_base64: str | None = None
     description: str = ""
     meal_type: str = "lunch"
     image_url: str | None = None  # S3 URL after iOS uploads image
 
 class MealPlanRequest(BaseModel):
-    user_id: str
+    # user_id comes from JWT token — not required in body
     trigger: str = "user_request"
     # "daily_routine" | "binge_recovery" | "inventory_expiry" | "user_request"
 
 class InventorySuggestRequest(BaseModel):
-    user_id: str
+    pass  # user_id comes from JWT token — no body fields needed'''
 
 
 # ─── Endpoints ───────────────────────────────
@@ -49,7 +50,7 @@ async def log_meal(request: Request, req: LogMealRequest, db: AsyncSession = Dep
 
     # 2. AI analysis
     try:
-        ai_result = await analyze_food(req.image_base64, req.description, context)
+        ai_result = await analyze_food_agentic(req.image_base64, req.description, context)
     except Exception as e:
         raise HTTPException(502, f"AI analysis failed: {str(e)}")
 
@@ -128,10 +129,16 @@ async def suggest_meals(req: InventorySuggestRequest, db: AsyncSession = Depends
 
 
 @router.get("/context/{user_id}")
-async def get_context(user_id: str, db: AsyncSession = Depends(get_db)):
+async def get_context(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Debug endpoint — returns the full knowledge base context for a user.
     Useful during development to verify history is building correctly.
     Remove or auth-gate before production.
     """
+    if current_user.id != user_id:
+        raise HTTPException(403, "Not authorised")
     return await get_user_context(db, user_id)

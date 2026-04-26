@@ -27,7 +27,7 @@ import jwt
 from app.db import get_db
 from app.config import settings
 from app.models.models import User
-from app.routes.users import calculate_targets
+from app.core.dependencies import calculate_targets, get_current_user, create_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -56,19 +56,6 @@ def decode_token(token: str) -> dict:
         raise HTTPException(401, "Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid token")
-
-
-async def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    payload = decode_token(token)
-    if payload.get("type") != "access":
-        raise HTTPException(401, "Invalid token type")
-    user = await db.get(User, payload["sub"])
-    if not user:
-        raise HTTPException(401, "User not found")
-    return user
 
 
 # ─────────────────────────────────────────────
