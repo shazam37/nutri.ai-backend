@@ -61,6 +61,23 @@ async def get_current_user(
     return user
 
 
+def _admin_email_set() -> set[str]:
+    return {
+        email.strip().lower()
+        for email in settings.ADMIN_EMAILS.split(",")
+        if email.strip()
+    }
+
+
+async def require_admin_user(
+    current_user=Depends(get_current_user),
+):
+    admin_emails = _admin_email_set()
+    if not current_user.email or current_user.email.lower() not in admin_emails:
+        raise HTTPException(403, "Admin access required")
+    return current_user
+
+
 # ─────────────────────────────────────────────
 # Mifflin-St Jeor calorie calculator
 # ─────────────────────────────────────────────

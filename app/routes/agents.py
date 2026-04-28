@@ -18,7 +18,7 @@ from app.db import get_db
 from app.models.models import User
 from app.agents.coach_agent import run_for_user, run_for_all_users
 from app.agents.scheduler import scheduler
-from app.routes.auth import get_current_user
+from app.core.dependencies import get_current_user, require_admin_user
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 logger = logging.getLogger(__name__)
@@ -45,8 +45,7 @@ async def trigger_coach_for_me(
 @router.post("/trigger-coach-all")
 async def trigger_coach_all_users(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    # In production: add an is_admin check here
+    current_user: User = Depends(require_admin_user),
 ):
     """
     Manually trigger the coach agent for ALL users.

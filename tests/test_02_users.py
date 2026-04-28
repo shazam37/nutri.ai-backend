@@ -9,6 +9,7 @@ Adding new user tests:
 """
 
 import pytest
+import time
 from tests.conftest import API
 
 
@@ -57,6 +58,31 @@ class TestUsers:
             headers={"Authorization": f"Bearer {shared_state.access_token}"}
         ).json()
         assert profile["name"] == "Updated User"
+
+
+    def test_03b_update_profile_wrong_user_rejected(self, client, shared_state):
+        """PUT /users/{id} for another user returns 403."""
+        other = client.post(f"{API}/auth/signup", json={
+            "email": f"other_{int(time.time())}@nutriai.com",
+            "password": "testpass123",
+            "name": "Other User",
+            "age": 30,
+            "weight_kg": 80.0,
+            "height_cm": 180.0,
+            "gender": "male",
+            "goal": "maintain",
+            "activity_level": "moderate",
+            "dietary_restrictions": [],
+        })
+        assert other.status_code == 201
+        other_user_id = other.json()["user_id"]
+
+        resp = client.put(
+            f"{API}/users/{other_user_id}",
+            headers={"Authorization": f"Bearer {shared_state.access_token}"},
+            json={"name": "Should Not Update"}
+        )
+        assert resp.status_code == 403
 
 
     def test_04_update_weight_recalculates_targets(self, client, shared_state):

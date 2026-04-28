@@ -405,6 +405,88 @@ Return ONLY JSON:
     result.setdefault("suggestions", [])
     return result
 
+
+async def suggest_what_to_eat_now(
+    context: dict,
+    meal_type: str | None = None,
+    max_options: int = 3,
+) -> dict:
+    """
+    Suggest immediate meal/snack options based on today's remaining budget,
+    inventory, expiring items, dietary restrictions, and recent meals.
+    """
+    inventory = context.get("inventory_detail", [])
+    expiring_soon = context.get("expiring_soon", [])
+    restrictions = context.get("dietary_restrictions", [])
+    today_meals = context.get("today_meals", [])
+    remaining_cal = context.get("remaining_calories", 2000)
+    remaining_pro = context.get("remaining_protein_g", 150)
+
+    inventory_str = (
+        "\n".join(
+            f"- {i['name']} ({i.get('quantity') or '?'}, expires {i.get('expiry_date') or 'unknown'})"
+            for i in inventory
+        )
+        if inventory else "No inventory tracked yet"
+    )
+
+    prompt = f"""You are a practical nutrition coach.
+
+The user wants to know what they can eat right now.
+
+USER CONTEXT:
+- Meal type requested: {meal_type or 'best fit'}
+- Calories remaining today: {remaining_cal:.0f}
+- Protein remaining today: {remaining_pro:.0f}g
+- Dietary restrictions: {', '.join(restrictions) if restrictions else 'none'}
+- Expiring soon: {', '.join(expiring_soon) if expiring_soon else 'none'}
+- Meals already eaten: {json.dumps(today_meals, indent=2) if today_meals else 'none logged'}
+
+AVAILABLE INVENTORY:
+{inventory_str}
+
+TASK:
+Suggest up to {max(1, min(max_options, 5))} realistic options the user can eat now.
+Prefer inventory items, especially expiring ones. If inventory is empty, suggest simple common options.
+Keep options close to the remaining calorie and protein budget.
+
+Return ONLY JSON:
+{{
+  "summary": "Short reason these options fit right now",
+  "options": [
+    {{
+      "name": "Paneer spinach bowl",
+      "meal_type": "dinner",
+      "why_this_fits": "Uses spinach before expiry and closes the protein gap",
+      "uses_inventory": ["paneer", "spinach"],
+      "missing_items": ["lemon"],
+      "estimated_macros": {{
+        "calories": 480,
+        "protein_g": 32,
+        "carbs_g": 38,
+        "fat_g": 18,
+        "fiber_g": 7
+      }},
+      "prep_time_mins": 15,
+      "log_hint": "Paneer spinach bowl, 1 serving"
+    }}
+  ],
+  "nudge": "One sentence coaching nudge"
+}}"""
+
+    response = client.chat.completions.create(
+        model=TEXT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1200,
+        temperature=0.35,
+    )
+
+    result = _parse_json(response.choices[0].message.content)
+    result.setdefault("summary", "Options generated from your current context.")
+    result.setdefault("options", [])
+    result.setdefault("nudge", "")
+    return result
+
 async def scan_inventory_image(image_base64: str) -> dict:
     """
     Identify grocery/fridge items from a photo.

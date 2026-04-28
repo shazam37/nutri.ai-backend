@@ -214,3 +214,19 @@ class TestInventory:
             assert "total_added"     in data
             assert "scan_confidence" in data
             assert isinstance(data["added"], list)
+
+
+    def test_11_what_can_i_eat_now(self, client, shared_state):
+        """Context-aware meal suggestions return options and live budget."""
+        resp = client.post(
+            f"{API}/meal/what-can-i-eat-now",
+            headers={"Authorization": f"Bearer {shared_state.access_token}"},
+            json={"meal_type": "dinner", "max_options": 2}
+        )
+        assert resp.status_code == 200, f"What-can-I-eat failed: {resp.text}"
+        data = resp.json()
+
+        assert "options" in data
+        assert "remaining_calories" in data
+        assert "remaining_protein_g" in data
+        assert isinstance(data["options"], list)

@@ -255,6 +255,8 @@ async def update_profile(
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(404, "User not found")
+    if current_user.id != user_id:
+        raise HTTPException(403, "Not authorised")
 
     # Track whether body stats changed (triggers recalculation)
     body_stats_changed = any([

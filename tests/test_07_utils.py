@@ -133,6 +133,32 @@ class TestUtils:
         assert resp.status_code == 403
 
 
+class TestCoach:
+
+    def test_01_today_coach_card(self, client, shared_state):
+        """GET /coach/today returns a home-screen coach card."""
+        resp = client.get(
+            f"{API}/coach/today",
+            headers={"Authorization": f"Bearer {shared_state.access_token}"}
+        )
+        assert resp.status_code == 200, f"Coach card failed: {resp.text}"
+        data = resp.json()
+
+        assert "card" in data
+        assert "progress" in data
+        assert "signals" in data
+        assert "title" in data["card"]
+        assert "message" in data["card"]
+        assert "action" in data["card"]
+        assert "remaining_calories" in data["progress"]
+
+
+    def test_02_today_coach_card_requires_auth(self, client):
+        """Coach card endpoint requires authentication."""
+        resp = client.get(f"{API}/coach/today")
+        assert resp.status_code == 401
+
+
 class TestAgents:
 
     def test_01_scheduler_status(self, client, shared_state):
@@ -195,7 +221,16 @@ class TestAgents:
         assert resp.status_code == 401
 
 
-    def test_04_rate_limit_fires_on_meal_log(self, client, shared_state):
+    def test_04_trigger_coach_all_requires_admin(self, client, shared_state):
+        """POST /agents/trigger-coach-all is admin-only."""
+        resp = client.post(
+            f"{API}/agents/trigger-coach-all",
+            headers={"Authorization": f"Bearer {shared_state.access_token}"}
+        )
+        assert resp.status_code == 403
+
+
+    def test_05_rate_limit_fires_on_meal_log(self, client, shared_state):
         """After 20 rapid /meal/log requests, 21st should return 429."""
         status_codes = []
         for _ in range(21):

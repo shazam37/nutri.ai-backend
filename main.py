@@ -14,6 +14,7 @@ from app.routes.auth      import router as auth_router
 from app.routes.history   import router as history_router
 from app.routes.plan      import router as plan_router
 from app.routes.utils     import router as utils_router
+from app.routes.coach     import router as coach_router
 from app.agents import scheduler
 from app.routes.agents import router as agents_router
 
@@ -58,6 +59,7 @@ app.include_router(inventory_router, prefix="/api/v1")
 app.include_router(history_router,   prefix="/api/v1")
 app.include_router(plan_router,      prefix="/api/v1")
 app.include_router(utils_router,     prefix="/api/v1")
+app.include_router(coach_router,     prefix="/api/v1")
 app.include_router(agents_router,    prefix="/api/v1")
 
 @app.get("/health")

@@ -214,3 +214,44 @@ class TestMealLogging:
 
         print(f"\n  ✓ Micros tracked for {data['logs_counted']} logs, "
               f"{len(data['top_deficits'])} deficits found")
+
+
+    def test_10_analyze_requires_auth(self, client):
+        """Analyze-before-save endpoint requires authentication."""
+        resp = client.post(
+            f"{API}/meal/analyze",
+            json={"description": "one apple", "meal_type": "snack"}
+        )
+        assert resp.status_code == 401
+
+
+    def test_11_log_reviewed_manual_meal(self, client, shared_state):
+        """Reviewed logging saves user-confirmed macros without an AI call."""
+        resp = client.post(
+            f"{API}/meal/log-reviewed",
+            headers={"Authorization": f"Bearer {shared_state.access_token}"},
+            json={
+                "meal_type": "snack",
+                "description": "reviewed greek yogurt",
+                "food_items": [
+                    {
+                        "name": "Greek Yogurt",
+                        "quantity": "150g",
+                        "calories": 120,
+                        "protein_g": 15,
+                        "carbs_g": 8,
+                        "fat_g": 3,
+                        "fiber_g": 0
+                    }
+                ],
+                "ai_confidence": 0.95,
+                "source": "quick_form"
+            }
+        )
+        assert resp.status_code == 200, f"Reviewed log failed: {resp.text}"
+        data = resp.json()
+
+        assert "log_id" in data
+        assert data["reviewed"] is True
+        assert data["total_macros"]["calories"] == 120.0
+        assert data["daily_totals"]["calories"] > 0
