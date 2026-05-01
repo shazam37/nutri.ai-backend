@@ -78,7 +78,7 @@ class UpdateProfileRequest(BaseModel):
     protein_target_g: float | None = None
     carbs_target_g: float | None = None
     fat_target_g: float | None = None
-
+    water_target_ml: float | None = None
 
 # ─────────────────────────────────────────────
 # Calorie / macro calculator

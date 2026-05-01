@@ -25,9 +25,23 @@ router = APIRouter(prefix="/utils", tags=["utils"])
 # Water tracking
 # ─────────────────────────────────────────────
 
+DEFAULT_WATER_TARGET_ML = 2500.0   # fallback if user hasn't set a target
+
 class WaterLogRequest(BaseModel):
     amount_ml: float
     # Common: 250 (glass), 500 (bottle), 330 (can)
+
+def _build_water_response(logged_ml: float | None, total: float, target_ml: float) -> dict:
+    """Single place that shapes every water response payload."""
+    response = {
+        "total_ml":     total,
+        "target_ml":    target_ml,
+        "remaining_ml": max(0.0, target_ml - total),
+        "progress_pct": min(100, round((total / target_ml) * 100)),
+    }
+    if logged_ml is not None:
+        response["logged_ml"] = logged_ml
+    return response
 
 @router.post("/water")
 async def log_water(
@@ -45,16 +59,10 @@ async def log_water(
     db.add(log)
     await db.commit()
 
-    # Return updated daily total
     total = await _get_water_total(db, current_user.id, date.today())
-    target_ml = 2500  # sensible default — could be user-configurable later
-    return {
-        "logged_ml":   req.amount_ml,
-        "total_ml":    total,
-        "target_ml":   target_ml,
-        "remaining_ml": max(0, target_ml - total),
-        "progress_pct": min(100, round((total / target_ml) * 100)),
-    }
+    target_ml = getattr(current_user, "water_target_ml", None) or DEFAULT_WATER_TARGET_ML
+
+    return _build_water_response(req.amount_ml, total, target_ml)
 
 
 @router.get("/water/{user_id}")
@@ -65,14 +73,11 @@ async def get_water_today(
 ):
     if current_user.id != user_id:
         raise HTTPException(403, "Not authorised")
+
     total = await _get_water_total(db, user_id, date.today())
-    target_ml = 2500
-    return {
-        "total_ml":     total,
-        "target_ml":    target_ml,
-        "remaining_ml": max(0, target_ml - total),
-        "progress_pct": min(100, round((total / target_ml) * 100)),
-    }
+    target_ml = getattr(current_user, "water_target_ml", None) or DEFAULT_WATER_TARGET_ML
+
+    return _build_water_response(None, total, target_ml)
 
 
 async def _get_water_total(db: AsyncSession, user_id: str, log_date: date) -> float:

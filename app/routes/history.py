@@ -19,6 +19,20 @@ from app.core.dependencies import get_current_user
 
 router = APIRouter(prefix="/history", tags=["history"])
 
+def _merge_micros(base: dict, incoming: dict, sign: float = 1.0) -> dict:
+    """
+    Merges `incoming` micros into `base` with a multiplier (+1 to add, -1 to subtract).
+    All keys from incoming are handled dynamically — no hardcoded micro names.
+    Values are clamped to >= 0.
+    """
+    result = dict(base)
+    for key, val in incoming.items():
+        try:
+            current = float(result.get(key, 0.0))
+            result[key] = max(0.0, round(current + sign * float(val), 4))
+        except (TypeError, ValueError):
+            continue  # skip non-numeric micro values
+    return result
 
 # ─────────────────────────────────────────────
 # Daily summary trend
@@ -35,7 +49,7 @@ async def get_daily_history(
     if current_user.id != user_id:
         raise HTTPException(403, "Not authorised")
 
-    today    = date.today()
+    today     = date.today()
     from_date = today - timedelta(days=days - 1)
 
     result = await db.execute(
@@ -49,7 +63,6 @@ async def get_daily_history(
     )
     summaries = result.scalars().all()
 
-    # Build a full date range (fill missing days with zeros)
     summary_by_date = {s.log_date: s for s in summaries}
     user = await db.get(User, user_id)
 
@@ -57,20 +70,27 @@ async def get_daily_history(
     for i in range(days):
         d = from_date + timedelta(days=i)
         s = summary_by_date.get(d)
+
+        # Round all micro values dynamically — no key assumptions
+        micros_rounded = (
+            {k: round(v, 2) for k, v in (s.micros_total or {}).items() if isinstance(v, (int, float))}
+            if s else {}
+        )
+
         daily.append({
-            "date":           str(d),
-            "calories":       round(s.total_calories,  1) if s else 0,
-            "protein_g":      round(s.total_protein_g, 1) if s else 0,
-            "carbs_g":        round(s.total_carbs_g,   1) if s else 0,
-            "fat_g":          round(s.total_fat_g,     1) if s else 0,
-            "fiber_g":        round(s.total_fiber_g,   1) if s else 0,
-            "meals_logged":   s.meals_logged if s else 0,
-            "is_binge_day":   s.is_binge_day if s else False,
+            "date":            str(d),
+            "calories":        round(s.total_calories,  1) if s else 0,
+            "protein_g":       round(s.total_protein_g, 1) if s else 0,
+            "carbs_g":         round(s.total_carbs_g,   1) if s else 0,
+            "fat_g":           round(s.total_fat_g,     1) if s else 0,
+            "fiber_g":         round(s.total_fiber_g,   1) if s else 0,
+            "meals_logged":    s.meals_logged if s else 0,
+            "is_binge_day":    s.is_binge_day if s else False,
             "target_calories": user.calorie_target if user else 2000,
-            "vs_target":      round(s.total_calories - user.calorie_target, 1) if (s and user) else 0,
+            "vs_target":       round(s.total_calories - user.calorie_target, 1) if (s and user) else 0,
+            "micros":          micros_rounded,
         })
 
-    # Streak: consecutive days with at least 1 meal logged
     streak = 0
     for d in reversed(daily):
         if d["meals_logged"] > 0:
@@ -153,7 +173,6 @@ async def delete_log(
     if log.user_id != current_user.id:
         raise HTTPException(403, "Not authorised")
 
-    # Revert the daily summary
     result = await db.execute(
         select(DailySummary).where(
             and_(
@@ -164,12 +183,17 @@ async def delete_log(
     )
     summary = result.scalar_one_or_none()
     if summary:
-        summary.total_calories  = max(0, summary.total_calories  - log.calories)
-        summary.total_protein_g = max(0, summary.total_protein_g - log.protein_g)
-        summary.total_carbs_g   = max(0, summary.total_carbs_g   - log.carbs_g)
-        summary.total_fat_g     = max(0, summary.total_fat_g     - log.fat_g)
-        summary.total_fiber_g   = max(0, summary.total_fiber_g   - log.fiber_g)
+        summary.total_calories  = max(0, summary.total_calories  - (log.calories  or 0))
+        summary.total_protein_g = max(0, summary.total_protein_g - (log.protein_g or 0))
+        summary.total_carbs_g   = max(0, summary.total_carbs_g   - (log.carbs_g   or 0))
+        summary.total_fat_g     = max(0, summary.total_fat_g     - (log.fat_g     or 0))
+        summary.total_fiber_g   = max(0, summary.total_fiber_g   - (log.fiber_g   or 0))
         summary.meals_logged    = max(0, summary.meals_logged    - 1)
+
+        # Subtract micros dynamically
+        summary.micros_total = _merge_micros(
+            summary.micros_total or {}, log.micros or {}, sign=-1.0
+        )
 
         user = await db.get(User, log.user_id)
         if user:
@@ -180,7 +204,6 @@ async def delete_log(
     await db.delete(log)
     await db.commit()
     return {"deleted": True, "log_id": log_id}
-
 
 # ─────────────────────────────────────────────
 # Edit a food log
@@ -194,6 +217,7 @@ class EditLogRequest(BaseModel):
     fat_g:     float | None = None
     fiber_g:   float | None = None
     meal_type: str   | None = None
+    micros: dict  | None = None
 
 
 @router.patch("/log/{log_id}")
@@ -219,8 +243,7 @@ async def edit_log(
     )
     summary = result.scalar_one_or_none()
 
-    # Calculate deltas and apply
-    # Map log field name → summary field name
+    # Macro delta logic (unchanged)
     field_map = {
         "calories":  "total_calories",
         "protein_g": "total_protein_g",
@@ -249,6 +272,18 @@ async def edit_log(
     if req.meal_type:
         log.meal_type = req.meal_type
 
+    # Micro replace strategy:
+    # Subtract the old log's micros, then add the new ones.
+    # Handles key set changes between original and edited result gracefully.
+    if req.micros is not None and summary:
+        summary.micros_total = _merge_micros(
+            summary.micros_total or {}, log.micros or {}, sign=-1.0   # remove old
+        )
+        summary.micros_total = _merge_micros(
+            summary.micros_total, req.micros, sign=1.0                 # add new
+        )
+        log.micros = req.micros
+
     # Recalculate remaining
     if summary:
         user = await db.get(User, log.user_id)
@@ -267,4 +302,5 @@ async def edit_log(
             "carbs_g":   log.carbs_g,
             "fat_g":     log.fat_g,
         },
+        "micros": log.micros or {},
     }

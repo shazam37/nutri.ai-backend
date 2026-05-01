@@ -1004,3 +1004,21 @@ All errors follow this format:
 **API Version:** 0.2.0  
 **Last Updated:** 2026-04-24
 
+---
+
+## Android POC Addendum
+
+These endpoints support the new Android POC flows without changing the original `/meal/log` behavior.
+
+### POST /meal/analyze
+Analyze a meal without saving it. Use this for the review/edit screen.
+
+### POST /meal/log-reviewed
+Save a user-confirmed or user-corrected meal result after review.
+
+### POST /meal/what-can-i-eat-now
+Return immediate meal/snack options using remaining calories, protein gap, inventory, expiring items, and dietary restrictions.
+
+### GET /coach/today
+Return a fast deterministic home-screen coach card with progress and action metadata.
+

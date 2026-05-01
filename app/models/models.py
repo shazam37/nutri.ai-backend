@@ -84,6 +84,7 @@ class User(Base):
     daily_summaries: Mapped[list["DailySummary"]]  = relationship(back_populates="user")
     inventory_items: Mapped[list["InventoryItem"]] = relationship(back_populates="user")
     meal_plans:      Mapped[list["MealPlan"]]      = relationship(back_populates="user")
+    water_target_ml: Mapped[float] = mapped_column(Float, nullable=True, default=None)
 
 
 # ─────────────────────────────────────────────
@@ -128,6 +129,7 @@ class FoodLog(Base):
 
     user: Mapped["User"] = relationship(back_populates="food_logs")
 
+    micros: Mapped[dict] = mapped_column(JSON, default=dict)
 
 # ─────────────────────────────────────────────
 # Daily Summary  (pre-aggregated per user per day)
@@ -166,7 +168,7 @@ class DailySummary(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="daily_summaries")
-
+    micros_total: Mapped[dict] = mapped_column(JSON, default=dict)
 
 # ─────────────────────────────────────────────
 # Inventory Items

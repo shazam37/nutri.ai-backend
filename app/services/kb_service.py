@@ -22,6 +22,21 @@ import uuid
 # WRITE: Save a food log + upsert daily summary
 # ─────────────────────────────────────────────
 
+def _merge_micros(base: dict, incoming: dict, sign: float = 1.0) -> dict:
+    """
+    Merges `incoming` micros into `base` with a multiplier (+1 to add, -1 to subtract).
+    All keys from incoming are handled dynamically — no hardcoded micro names.
+    Values are clamped to >= 0.
+    """
+    result = dict(base)
+    for key, val in incoming.items():
+        try:
+            current = float(result.get(key, 0.0))
+            result[key] = max(0.0, round(current + sign * float(val), 4))
+        except (TypeError, ValueError):
+            continue  # skip non-numeric micro values
+    return result
+
 async def save_log(
     db: AsyncSession,
     user_id: str,
@@ -32,12 +47,9 @@ async def save_log(
     user_description: str = "",
     image_url: str | None = None,
 ) -> str:
-    """
-    Saves one FoodLog row and upserts the DailySummary for today.
-    Returns the new log_id.
-    """
-    today = date.today()
+    today  = date.today()
     totals = ai_result.get("total", {})
+    micros = ai_result.get("micros", {}) or {}          # dynamic — whatever the AI returned
 
     # 1. Create FoodLog
     log = FoodLog(
@@ -54,13 +66,13 @@ async def save_log(
         carbs_g=totals.get("carbs_g", 0),
         fat_g=totals.get("fat_g", 0),
         fiber_g=totals.get("fiber_g", 0),
+        micros=micros,                                   # stored as-is
         usda_validation=usda_result,
         ai_confidence=ai_result.get("confidence", 0.0),
     )
     db.add(log)
 
     # 2. Upsert DailySummary
-    # _get_or_create_summary guarantees all numeric fields are non-None
     summary = await _get_or_create_summary(db, user_id, today)
     summary.total_calories  = float(summary.total_calories)  + float(log.calories  or 0)
     summary.total_protein_g = float(summary.total_protein_g) + float(log.protein_g or 0)
@@ -70,13 +82,15 @@ async def save_log(
     summary.meals_logged    = int(summary.meals_logged) + 1
     summary.updated_at      = datetime.utcnow()
 
+    # Merge micros dynamically into the summary's JSON column
+    summary.micros_total = _merge_micros(summary.micros_total or {}, micros, sign=1.0)
+
     # 3. Recalculate remaining macros against user targets
     user = await db.get(User, user_id)
     if user:
-        summary.remaining_calories  = max(0, user.calorie_target - summary.total_calories)
+        summary.remaining_calories  = max(0, user.calorie_target   - summary.total_calories)
         summary.remaining_protein_g = max(0, user.protein_target_g - summary.total_protein_g)
-        # Flag binge day: exceeded calorie target by >30%
-        summary.is_binge_day = summary.total_calories > (user.calorie_target * 1.3)
+        summary.is_binge_day        = summary.total_calories > (user.calorie_target * 1.3)
 
     await db.commit()
     await db.refresh(log)
