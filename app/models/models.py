@@ -202,6 +202,8 @@ class InventoryItem(Base):
 
     user: Mapped["User"] = relationship(back_populates="inventory_items")
 
+    scan_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 # ─────────────────────────────────────────────
 # Meal Plans  (AI-generated, stored per user per day)

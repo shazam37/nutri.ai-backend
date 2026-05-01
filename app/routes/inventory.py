@@ -9,6 +9,7 @@ from app.db import get_db
 from app.models.models import InventoryItem, User
 from app.routes.auth import get_current_user
 from app.services.ai_service import scan_inventory_image
+from app.services.image_service import upload_inventory_scan
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
@@ -86,6 +87,7 @@ async def get_inventory(
                     (i.expiry_date - today).days <= 3
                     if i.expiry_date else False
                 ),
+                "scan_image_url":    i.scan_image_url,
             }
             for i in items
         ],
@@ -148,35 +150,31 @@ async def scan_image_and_add(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Scan a photo of your fridge or grocery bag.
-    AI identifies all items and bulk-adds them to your inventory.
-    Returns added items with estimated expiry dates.
+    # Step 1: Upload scan image first — we want the URL before creating items
+    # Runs concurrently with nothing yet, but uploading early means URL is ready
+    # before we touch the DB. Failure is non-blocking.
+    scan_image_url = await upload_inventory_scan(req.image_base64, current_user.id)
 
-    iOS flow:
-      User taps "Scan fridge" → camera → capture → base64 → this endpoint
-      Response shows detected items → user can confirm/edit before saving
-    """
-    # Step 1: AI identifies items from image
-    scan_result = await scan_inventory_image(req.image_base64)
+    # Step 2: AI identifies items from image
+    scan_result    = await scan_inventory_image(req.image_base64)
     items_detected = scan_result.get("items", [])
 
     if not items_detected:
         return {
-            "added": [],
-            "total_added": 0,
-            "scan_confidence": scan_result.get("scan_confidence", 0),
-            "message": "No items detected. Try a clearer photo with better lighting.",
+            "added":            [],
+            "total_added":      0,
+            "scan_confidence":  scan_result.get("scan_confidence", 0),
+            "scan_image_url":   scan_image_url,   # still return URL even if no items found
+            "message":          "No items detected. Try a clearer photo with better lighting.",
         }
 
-    # Step 2: Bulk-add all detected items to inventory
+    # Step 3: Bulk-add all detected items, each carrying the scan URL
     added = []
     today = date.today()
 
     for detected in items_detected:
         shelf_days = detected.get("estimated_shelf_days", 7)
-        expiry = today + timedelta(days=shelf_days)
-        days_until = shelf_days
+        expiry     = today + timedelta(days=shelf_days)
 
         item = InventoryItem(
             id=str(uuid.uuid4()),
@@ -184,28 +182,31 @@ async def scan_image_and_add(
             name=detected["name"],
             quantity=detected.get("quantity"),
             expiry_date=expiry,
-            days_until_expiry=days_until,
+            days_until_expiry=shelf_days,
             category=detected.get("category", "other"),
             is_available=True,
+            scan_image_url=scan_image_url,   # ← same URL on all items from this scan
         )
         db.add(item)
         added.append({
-            "item_id":          item.id,
-            "name":             item.name,
-            "quantity":         item.quantity,
-            "category":         item.category,
-            "expiry_date":      str(expiry),
-            "days_until_expiry": days_until,
-            "expiring_soon":    days_until <= 3,
-            "ai_confidence":    detected.get("confidence", 0.7),
+            "item_id":           item.id,
+            "name":              item.name,
+            "quantity":          item.quantity,
+            "category":          item.category,
+            "expiry_date":       str(expiry),
+            "days_until_expiry": shelf_days,
+            "expiring_soon":     shelf_days <= 3,
+            "ai_confidence":     detected.get("confidence", 0.7),
+            "scan_image_url":    scan_image_url,
         })
 
     await db.commit()
 
     return {
-        "added":            added,
-        "total_added":      len(added),
-        "scan_confidence":  scan_result.get("scan_confidence", 0),
-        "notes":            scan_result.get("notes", ""),
-        "message": f"Added {len(added)} item(s) to your inventory.",
+        "added":           added,
+        "total_added":     len(added),
+        "scan_confidence": scan_result.get("scan_confidence", 0),
+        "scan_image_url":  scan_image_url,
+        "notes":           scan_result.get("notes", ""),
+        "message":         f"Added {len(added)} item(s) to your inventory.",
     }

@@ -15,6 +15,7 @@ from app.services.ai_service import (
 from app.agents.analyser_agent import analyze_food_agentic
 from app.services.usda_service import validate_food
 from app.services.kb_service import save_log, get_user_context
+from app.services.image_service import upload_meal_image
 
 router = APIRouter(prefix="/meal", tags=["meal"])
 
@@ -101,7 +102,19 @@ async def _run_meal_analysis(req: LogMealRequest, db: AsyncSession, user_id: str
         except Exception:
             usda_result = {"matched": False, "error": "USDA lookup failed"}
 
-    return {"ai_result": ai_result, "usda_result": usda_result}
+    # Upload image if base64 was provided — falls back to req.image_url if upload fails
+    image_url = req.image_url  # preserve if client sent a URL directly
+    if req.image_base64:
+        uploaded_url = await upload_meal_image(req.image_base64, user_id)
+        if uploaded_url:
+            image_url = uploaded_url
+        # if upload fails, image_url stays as req.image_url (likely None) — meal log still saves
+
+    return {
+        "ai_result":   ai_result,
+        "usda_result": usda_result,
+        "image_url":   image_url,       # ← resolved URL, whatever the source
+    }
 
 
 @router.post("/analyze")
@@ -112,37 +125,34 @@ async def analyze_meal_for_review(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Analyse a meal without saving it.
-    Android should show this result on a review/edit screen, then call
-    /meal/log-reviewed after the user confirms or corrects the result.
-    """
-    analysis = await _run_meal_analysis(req, db, current_user.id)
-    ai_result = analysis["ai_result"]
+    analysis   = await _run_meal_analysis(req, db, current_user.id)
+    ai_result  = analysis["ai_result"]
     usda_result = analysis["usda_result"]
-    source = "image" if req.image_base64 else "text"
+    image_url  = analysis["image_url"]          # ← resolved Cloudinary URL
+    source     = "image" if req.image_base64 else "text"
 
     return {
         "review_required": True,
-        "food_items": ai_result.get("food_items", []),
-        "total_macros": ai_result.get("total", {}),
-        "micros": ai_result.get("micros", {}),
-        "ai_confidence": ai_result.get("confidence", 0),
-        "ai_notes": ai_result.get("notes", ""),
-        "agent_steps": ai_result.get("agent_steps", []),
-        "agent_invoked": ai_result.get("agent_invoked", False),
+        "food_items":      ai_result.get("food_items", []),
+        "total_macros":    ai_result.get("total", {}),
+        "micros":          ai_result.get("micros", {}),
+        "ai_confidence":   ai_result.get("confidence", 0),
+        "ai_notes":        ai_result.get("notes", ""),
+        "agent_steps":     ai_result.get("agent_steps", []),
+        "agent_invoked":   ai_result.get("agent_invoked", False),
         "usda_validation": usda_result,
+        "image_url":       image_url,           # ← BUG 1 FIX: top-level field
         "suggested_log_payload": {
-            "food_items": ai_result.get("food_items", []),
-            "meal_type": req.meal_type,
-            "total_macros": ai_result.get("total", {}),
-            "micros": ai_result.get("micros", {}),
-            "ai_confidence": ai_result.get("confidence", 0),
-            "ai_notes": ai_result.get("notes", ""),
+            "food_items":     ai_result.get("food_items", []),
+            "meal_type":      req.meal_type,
+            "total_macros":   ai_result.get("total", {}),
+            "micros":         ai_result.get("micros", {}),
+            "ai_confidence":  ai_result.get("confidence", 0),
+            "ai_notes":       ai_result.get("notes", ""),
             "usda_validation": usda_result,
-            "description": req.description,
-            "image_url": req.image_url,
-            "source": source,
+            "description":    req.description,
+            "image_url":      image_url,        # ← BUG 2 FIX: was req.image_url
+            "source":         source,
         },
     }
 
@@ -204,12 +214,8 @@ async def log_meal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Existing one-shot meal logging endpoint.
-    Kept intact for current clients: analyse, validate, save, return totals.
-    """
-    analysis = await _run_meal_analysis(req, db, current_user.id)
-    ai_result = analysis["ai_result"]
+    analysis   = await _run_meal_analysis(req, db, current_user.id)
+    ai_result  = analysis["ai_result"]
     usda_result = analysis["usda_result"]
 
     log_id = await save_log(
@@ -220,23 +226,24 @@ async def log_meal(
         ai_result=ai_result,
         usda_result=usda_result,
         user_description=req.description,
-        image_url=req.image_url,
+        image_url=analysis["image_url"],    # ← was req.image_url before
     )
 
     updated_context = await get_user_context(db, current_user.id)
 
     return {
-        "log_id": log_id,
-        "food_items": ai_result.get("food_items", []),
-        "total_macros": ai_result.get("total", {}),
-        "ai_confidence": ai_result.get("confidence", 0),
-        "ai_notes": ai_result.get("notes", ""),
-        "usda_validation": usda_result,
-        "daily_totals": updated_context["today_totals"],
-        "remaining_calories": updated_context["remaining_calories"],
-        "remaining_protein_g": updated_context["remaining_protein_g"],
-        "meals_logged_today": updated_context["meals_logged_today"],
-        "binge_alert": updated_context["binge_recovery_mode"],
+        "log_id":               log_id,
+        "food_items":           ai_result.get("food_items", []),
+        "total_macros":         ai_result.get("total", {}),
+        "ai_confidence":        ai_result.get("confidence", 0),
+        "ai_notes":             ai_result.get("notes", ""),
+        "usda_validation":      usda_result,
+        "image_url":            analysis["image_url"],   # frontend can display immediately
+        "daily_totals":         updated_context["today_totals"],
+        "remaining_calories":   updated_context["remaining_calories"],
+        "remaining_protein_g":  updated_context["remaining_protein_g"],
+        "meals_logged_today":   updated_context["meals_logged_today"],
+        "binge_alert":          updated_context["binge_recovery_mode"],
     }
 
 
