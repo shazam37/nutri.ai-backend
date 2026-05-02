@@ -23,6 +23,13 @@ client = Groq(api_key=settings.GROQ_API_KEY)
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 TEXT_MODEL   = "llama-3.3-70b-versatile"
 
+_DEFAULT_MICROS = {
+    "iron_mg": 0, "calcium_mg": 0, "vitamin_c_mg": 0,
+    "vitamin_d_iu": 0, "vitamin_b12_mcg": 0, "zinc_mg": 0,
+    "magnesium_mg": 0, "potassium_mg": 0, "sodium_mg": 0,
+    "omega3_g": 0, "folate_mcg": 0,
+}
+
 
 # ─────────────────────────────────────────────
 # Helper: robustly parse JSON from model output
@@ -91,7 +98,6 @@ def _normalise_food_response(result: dict) -> dict:
 
     # ── total ────────────────────────────────────
     if "total" not in result or not isinstance(result.get("total"), dict):
-        # Compute from food_items if model forgot to include it
         result["total"] = {
             "calories":  sum(i["calories"]  for i in result["food_items"]),
             "protein_g": sum(i["protein_g"] for i in result["food_items"]),
@@ -104,22 +110,16 @@ def _normalise_food_response(result: dict) -> dict:
             result["total"].setdefault(field, 0.0)
 
     # ── micros ───────────────────────────────────
-    default_micros = {
-        "iron_mg": 0, "calcium_mg": 0, "vitamin_c_mg": 0,
-        "vitamin_d_iu": 0, "vitamin_b12_mcg": 0, "zinc_mg": 0,
-        "magnesium_mg": 0, "potassium_mg": 0, "sodium_mg": 0,
-        "omega3_g": 0, "folate_mcg": 0,
-    }
     if "micros" not in result or not isinstance(result.get("micros"), dict):
-        result["micros"] = default_micros
+        result["micros"] = dict(_DEFAULT_MICROS)
     else:
-        for k, v in default_micros.items():
-            result["micros"].setdefault(k, v)
+        for k in _DEFAULT_MICROS:
+            result["micros"].setdefault(k, 0)
 
     # ── confidence ───────────────────────────────
     raw_conf = result.get("confidence")
     if raw_conf is None or not isinstance(raw_conf, (int, float)):
-        result["confidence"] = 0.7   # safe default
+        result["confidence"] = 0.7
     else:
         result["confidence"] = max(0.0, min(1.0, float(raw_conf)))
 
@@ -127,6 +127,67 @@ def _normalise_food_response(result: dict) -> dict:
     result.setdefault("notes", "")
 
     return result
+
+
+# ─────────────────────────────────────────────
+# Inventory formatting helpers
+# ─────────────────────────────────────────────
+
+def _fmt_inventory_item(i: dict) -> str:
+    """
+    Compact format for meal plan prompt — shows calories + protein only.
+    Used in generate_meal_plan and suggest_from_inventory.
+    """
+    macros = i.get("macros") or {}
+    cal    = macros.get("calories",  0)
+    pro    = macros.get("protein_g", 0)
+    carbs  = macros.get("carbs_g",   0)
+    fat    = macros.get("fat_g",     0)
+    qty    = i.get("quantity") or "?"
+    if cal:
+        return (
+            f"- {i['name']} ({qty}) "
+            f"— {cal:.0f} kcal | {pro:.0f}g P / {carbs:.0f}g C / {fat:.0f}g F"
+        )
+    return f"- {i['name']} ({qty})"
+
+
+def _fmt_inventory_item_full(i: dict) -> str:
+    """
+    Full format for what-can-I-eat-now prompt — includes expiry + all macros.
+    """
+    macros = i.get("macros") or {}
+    cal    = macros.get("calories",  0)
+    pro    = macros.get("protein_g", 0)
+    carbs  = macros.get("carbs_g",   0)
+    fat    = macros.get("fat_g",     0)
+    expiry = i.get("expiry_date") or "unknown"
+    qty    = i.get("quantity") or "?"
+    nutrition = (
+        f", {cal:.0f} kcal | {pro:.0f}g P / {carbs:.0f}g C / {fat:.0f}g F"
+        if cal else ""
+    )
+    return f"- {i['name']} ({qty}, expires {expiry}{nutrition})"
+
+
+def _fmt_micro_rich_items(inventory: list) -> str:
+    """
+    Summarises micronutrient-rich inventory items for the meal plan prompt.
+    Only includes items that have at least one non-zero micro value.
+    """
+    lines = []
+    for i in inventory:
+        micros = i.get("micros") or {}
+        highlights = []
+        if micros.get("iron_mg",      0) > 0: highlights.append(f"iron {micros['iron_mg']:.1f}mg")
+        if micros.get("calcium_mg",   0) > 0: highlights.append(f"calcium {micros['calcium_mg']:.0f}mg")
+        if micros.get("vitamin_c_mg", 0) > 0: highlights.append(f"vit-C {micros['vitamin_c_mg']:.0f}mg")
+        if micros.get("vitamin_d_iu", 0) > 0: highlights.append(f"vit-D {micros['vitamin_d_iu']:.0f}IU")
+        if micros.get("zinc_mg",      0) > 0: highlights.append(f"zinc {micros['zinc_mg']:.1f}mg")
+        if micros.get("omega3_g",     0) > 0: highlights.append(f"omega-3 {micros['omega3_g']:.2f}g")
+        if highlights:
+            lines.append(f"- {i['name']}: {', '.join(highlights)}")
+    return "\n".join(lines) if lines else "No micronutrient data yet"
 
 
 # ─────────────────────────────────────────────
@@ -235,7 +296,7 @@ Rules:
 
     raw = response.choices[0].message.content
     result = _parse_json(raw)
-    return _normalise_food_response(result)   # ← normalise called here
+    return _normalise_food_response(result)
 
 
 # ─────────────────────────────────────────────
@@ -257,10 +318,15 @@ async def generate_meal_plan(context: dict, trigger: str = "daily_routine") -> d
     week_summary  = context.get("week_summary", [])
     today_meals   = context.get("today_meals", [])
 
+    # Full macro breakdown per item so AI can match targets precisely
     inventory_str = (
-        "\n".join(f"- {i['name']} ({i.get('quantity','?')})" for i in inventory)
+        "\n".join(_fmt_inventory_item(i) for i in inventory)
         if inventory else "No inventory tracked yet"
     )
+
+    # Micro highlights — lets AI prioritise nutrient-dense items
+    micro_str = _fmt_micro_rich_items(inventory)
+
     expiring_str = ", ".join(expiring_soon) if expiring_soon else "none"
 
     week_str = (
@@ -300,13 +366,17 @@ WEEKLY HISTORY:
 {week_str}
 {binge_instruction}
 
-AVAILABLE INVENTORY:
+AVAILABLE INVENTORY (with full macros per item):
 {inventory_str}
 
-EXPIRING SOON (prioritise these): {expiring_str}
+MICRONUTRIENT-RICH INVENTORY ITEMS:
+{micro_str}
+(Prioritise these to help close micronutrient gaps alongside macro targets)
+
+EXPIRING SOON (use first): {expiring_str}
 
 TASK: Generate a meal plan for the remaining meals today.
-- Prefer using inventory items, especially expiring ones
+- Prefer inventory items, especially expiring ones and micro-rich ones
 - Each meal must have a simple recipe (steps a home cook can follow)
 - Keep total macros close to the REMAINING targets above
 
@@ -354,7 +424,7 @@ Return ONLY this JSON structure:
     result.setdefault("plan_summary", "Meal plan generated based on your targets.")
     result.setdefault("meals", [])
     result.setdefault("total_plan_macros", {})
-    result["trigger"]       = trigger
+    result["trigger"]        = trigger
     result["binge_recovery"] = binge_mode
     return result
 
@@ -371,15 +441,17 @@ async def suggest_from_inventory(context: dict) -> dict:
     if not inventory:
         return {"suggestions": [], "message": "Add items to your inventory first."}
 
-    inventory_str = "\n".join(
-        f"- {i['name']} ({i.get('quantity','?')})" for i in inventory
+    # Full macro breakdown so AI can estimate meal macros accurately
+    inventory_str = (
+        "\n".join(_fmt_inventory_item(i) for i in inventory)
+        if inventory else "No inventory tracked yet"
     )
 
     prompt = f"""Given these available ingredients, suggest 3 quick meals.
 Dietary restrictions: {', '.join(restrictions) if restrictions else 'none'}
 Must use expiring items if possible: {', '.join(expiring_soon) if expiring_soon else 'none'}
 
-Available:
+Available (with macros per item):
 {inventory_str}
 
 Return ONLY JSON:
@@ -389,7 +461,13 @@ Return ONLY JSON:
       "name": "Egg Fried Rice",
       "uses": ["eggs", "rice", "spring onions"],
       "prep_time_mins": 15,
-      "estimated_calories": 450
+      "estimated_macros": {{
+        "calories": 450,
+        "protein_g": 18,
+        "carbs_g": 55,
+        "fat_g": 12,
+        "fiber_g": 3
+      }}
     }}
   ]
 }}"""
@@ -406,6 +484,10 @@ Return ONLY JSON:
     return result
 
 
+# ─────────────────────────────────────────────
+# 4. What can I eat now
+# ─────────────────────────────────────────────
+
 async def suggest_what_to_eat_now(
     context: dict,
     meal_type: str | None = None,
@@ -415,18 +497,16 @@ async def suggest_what_to_eat_now(
     Suggest immediate meal/snack options based on today's remaining budget,
     inventory, expiring items, dietary restrictions, and recent meals.
     """
-    inventory = context.get("inventory_detail", [])
+    inventory     = context.get("inventory_detail", [])
     expiring_soon = context.get("expiring_soon", [])
-    restrictions = context.get("dietary_restrictions", [])
-    today_meals = context.get("today_meals", [])
+    restrictions  = context.get("dietary_restrictions", [])
+    today_meals   = context.get("today_meals", [])
     remaining_cal = context.get("remaining_calories", 2000)
     remaining_pro = context.get("remaining_protein_g", 150)
 
+    # Full format: expiry + all macros per item
     inventory_str = (
-        "\n".join(
-            f"- {i['name']} ({i.get('quantity') or '?'}, expires {i.get('expiry_date') or 'unknown'})"
-            for i in inventory
-        )
+        "\n".join(_fmt_inventory_item_full(i) for i in inventory)
         if inventory else "No inventory tracked yet"
     )
 
@@ -442,13 +522,14 @@ USER CONTEXT:
 - Expiring soon: {', '.join(expiring_soon) if expiring_soon else 'none'}
 - Meals already eaten: {json.dumps(today_meals, indent=2) if today_meals else 'none logged'}
 
-AVAILABLE INVENTORY:
+AVAILABLE INVENTORY (with full macros and expiry):
 {inventory_str}
 
 TASK:
 Suggest up to {max(1, min(max_options, 5))} realistic options the user can eat now.
 Prefer inventory items, especially expiring ones. If inventory is empty, suggest simple common options.
 Keep options close to the remaining calorie and protein budget.
+Use the per-item macro data above to estimate each suggestion's macros accurately.
 
 Return ONLY JSON:
 {{
@@ -487,15 +568,22 @@ Return ONLY JSON:
     result.setdefault("nudge", "")
     return result
 
+
+# ─────────────────────────────────────────────
+# 5. Inventory image scanner
+# ─────────────────────────────────────────────
+
 async def scan_inventory_image(image_base64: str) -> dict:
     """
     Identify grocery/fridge items from a photo.
-    Returns a list of items ready to be bulk-added to inventory.
-    Called by POST /inventory/scan-image
+    Returns a list of items with full macro + micro data,
+    ready to be bulk-added to inventory.
+    Called by POST /inventory/scan-image.
     """
-    system_prompt = """You are a grocery and pantry inventory AI.
+    system_prompt = """You are a grocery and pantry inventory AI with nutrition expertise.
 Analyse the image and identify every distinct food item you can see.
-For each item estimate: quantity visible, likely category, and approximate shelf life.
+For each item estimate: quantity visible, likely category, approximate shelf life,
+and the nutritional content per 100g (or per unit if countable).
 
 Return ONLY valid JSON. No explanation, no markdown, no preamble."""
 
@@ -509,14 +597,54 @@ Return this exact JSON:
       "quantity": "6",
       "category": "protein",
       "estimated_shelf_days": 21,
-      "confidence": 0.95
+      "confidence": 0.95,
+      "nutrition_per_100g": {
+        "calories": 155,
+        "protein_g": 13.0,
+        "carbs_g": 1.1,
+        "fat_g": 11.0,
+        "fiber_g": 0.0
+      },
+      "micros_per_100g": {
+        "iron_mg": 1.8,
+        "calcium_mg": 56,
+        "vitamin_c_mg": 0,
+        "vitamin_d_iu": 82,
+        "vitamin_b12_mcg": 1.1,
+        "zinc_mg": 1.3,
+        "magnesium_mg": 12,
+        "potassium_mg": 138,
+        "sodium_mg": 142,
+        "omega3_g": 0.1,
+        "folate_mcg": 44
+      }
     },
     {
       "name": "Spinach",
       "quantity": "200g",
       "category": "vegetable",
       "estimated_shelf_days": 4,
-      "confidence": 0.88
+      "confidence": 0.88,
+      "nutrition_per_100g": {
+        "calories": 23,
+        "protein_g": 2.9,
+        "carbs_g": 3.6,
+        "fat_g": 0.4,
+        "fiber_g": 2.2
+      },
+      "micros_per_100g": {
+        "iron_mg": 2.7,
+        "calcium_mg": 99,
+        "vitamin_c_mg": 28,
+        "vitamin_d_iu": 0,
+        "vitamin_b12_mcg": 0,
+        "zinc_mg": 0.5,
+        "magnesium_mg": 79,
+        "potassium_mg": 558,
+        "sodium_mg": 79,
+        "omega3_g": 0.1,
+        "folate_mcg": 194
+      }
     }
   ],
   "scan_confidence": 0.9,
@@ -525,6 +653,8 @@ Return this exact JSON:
 
 Categories: protein | vegetable | dairy | grain | fruit | spice | beverage | other
 estimated_shelf_days: realistic fridge/pantry life from today
+nutrition_per_100g: macros per 100g (or per whole unit for countable items like eggs)
+micros_per_100g: micronutrients per 100g — estimate all fields, use 0 if truly negligible
 confidence per item: 0.0-1.0
 scan_confidence: overall image quality score"""
 
@@ -543,13 +673,12 @@ scan_confidence: overall image quality score"""
                 ]
             }
         ],
-        max_tokens=1000,
+        max_tokens=1500,
         temperature=0.1,
     )
 
     result = _parse_json(response.choices[0].message.content)
 
-    # Normalise response
     result.setdefault("items", [])
     result.setdefault("scan_confidence", 0.7)
     result.setdefault("notes", "")
@@ -560,5 +689,17 @@ scan_confidence: overall image quality score"""
         item.setdefault("category", "other")
         item.setdefault("estimated_shelf_days", 7)
         item.setdefault("confidence", 0.7)
+
+        # Flatten nutrition_per_100g → top-level macro fields
+        nutrition = item.pop("nutrition_per_100g", {}) or {}
+        item["calories"]  = float(nutrition.get("calories",  0) or 0)
+        item["protein_g"] = float(nutrition.get("protein_g", 0) or 0)
+        item["carbs_g"]   = float(nutrition.get("carbs_g",   0) or 0)
+        item["fat_g"]     = float(nutrition.get("fat_g",     0) or 0)
+        item["fiber_g"]   = float(nutrition.get("fiber_g",   0) or 0)
+
+        # Flatten micros_per_100g → normalised micros dict
+        raw_micros = item.pop("micros_per_100g", {}) or {}
+        item["micros"] = {k: float(raw_micros.get(k, 0) or 0) for k in _DEFAULT_MICROS}
 
     return result

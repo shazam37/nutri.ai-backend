@@ -11,7 +11,7 @@ Tables:
 import uuid
 from datetime import datetime, date
 from sqlalchemy import (
-    String, Float, Integer, Boolean, Text,
+    Column, String, Float, Integer, Boolean, Text,
     DateTime, Date, ForeignKey, JSON, Enum as SAEnum
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -203,6 +203,16 @@ class InventoryItem(Base):
     user: Mapped["User"] = relationship(back_populates="inventory_items")
 
     scan_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Macros
+    calories: Mapped[Column] = mapped_column(Float, nullable=True)
+    protein_g: Mapped[Column] = mapped_column(Float, nullable=True)
+    carbs_g: Mapped[Column] = mapped_column(Float, nullable=True)
+    fat_g: Mapped[Column] = mapped_column(Float, nullable=True)
+    fiber_g: Mapped[Column] = mapped_column(Float, nullable=True)
+
+    # Micros (same schema as meal logs)
+    micros: Mapped[Column] = mapped_column(JSON, nullable=True)
 
 
 # ─────────────────────────────────────────────
